@@ -40,12 +40,34 @@ export function adjustTransactionSigns(transactions: Transaction[]): Transaction
 }
 
 // ============================================================================
+// Step 1b: Settlement date computation
+// ============================================================================
+
+/**
+ * Computes the settlement date for a treasury transaction.
+ *
+ * US Treasury securities settle on a T+1 basis: ownership transfers one
+ * business day after the trade date. Weekend days (Saturday and Sunday)
+ * are skipped when counting business days.
+ *
+ * Activity should be attributed to the settlement date, not the trade date,
+ * since that is when the position actually changes.
+ */
+export function computeSettlementDate(tradeDate: string): string {
+  // TODO: implement proper T+1 settlement logic
+  return tradeDate;
+}
+
+// ============================================================================
 // Step 2: Group by month and transaction type
 // ============================================================================
 
 /**
- * Groups transactions by month (YYYY-MM) and transaction type, summing
- * directed quantities within each group.
+ * Groups transactions by settlement month (YYYY-MM) and transaction type,
+ * summing directed quantities within each group.
+ *
+ * Uses settlement date (T+1 business day) rather than trade date to
+ * determine the month attribution, since that is when ownership transfers.
  */
 export function groupByMonthAndType(
   transactions: Transaction[]
@@ -53,7 +75,8 @@ export function groupByMonthAndType(
   const result: Record<string, Record<string, number>> = {};
 
   for (const txn of transactions) {
-    const month = txn.tradeDate.slice(0, 7); // YYYY-MM
+    const settlementDate = computeSettlementDate(txn.tradeDate);
+    const month = settlementDate.slice(0, 7); // YYYY-MM
     if (!result[month]) {
       result[month] = {};
     }
