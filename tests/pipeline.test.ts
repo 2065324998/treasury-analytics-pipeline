@@ -3,9 +3,6 @@
  *
  * Uses realistic Fed transaction data including BUY, MATURATION, and
  * MATURATION_OFFSET transactions to verify the full visualization pipeline.
- *
- * Note: Trade dates are on business days. Settlement occurs T+1 business day
- * after trade. Some transactions near month-end settle in the following month.
  */
 import { describe, test, expect } from 'vitest';
 import {
@@ -14,7 +11,6 @@ import {
   combineMaturationColumns,
   cumulativeSum,
   convertToBillions,
-  computeSettlementDate,
   sortDates,
   calculateNetTotal,
   formatBillions,
@@ -24,18 +20,18 @@ import type { Transaction } from '../src/types.js';
 
 
 /**
- * Realistic SOMA transaction dataset.
+ * Realistic SOMA transaction dataset covering Jan-May 2024.
  *
- * Core mid-month activity (settle in same month):
+ * Core mid-month activity:
  *   Jan: BUY 10B, MATURATION 3B, MATURATION_OFFSET 1B
  *   Feb: BUY 8B
  *   Mar: BUY 5B, MATURATION 6B
  *
- * Month-boundary settlements (settle in NEXT month):
- *   Jan 31 (Wed): MATURATION 4B, MATURATION_OFFSET 1.5B -> settle Feb 1
- *   Mar 29 (Fri): BUY 3B -> settle Apr 1 (Mon, skips weekend)
+ * End-of-month activity:
+ *   Jan 31: MATURATION 4B, MATURATION_OFFSET 1.5B
+ *   Mar 29: BUY 3B
  *
- * Pure outflow month (settle in same month):
+ * Pure outflow:
  *   May: MATURATION 5B
  */
 function buildTestTransactions(): Transaction[] {
@@ -97,7 +93,7 @@ function buildTestTransactions(): Transaction[] {
       productType: 'Note',
       tenor: '2Y',
     },
-    // Month-boundary: Jan 31 (Wed) -> settle Feb 1 (Thu)
+    // End-of-month: Jan 31 (Wednesday)
     {
       identifier: '912797CC1',
       transactionType: 'MATURATION',
@@ -116,7 +112,7 @@ function buildTestTransactions(): Transaction[] {
       productType: 'Bill',
       tenor: '13W',
     },
-    // Month-boundary: Mar 29 (Fri) -> settle Apr 1 (Mon, skips weekend)
+    // End-of-month: Mar 29 (Friday)
     {
       identifier: '912810XX9',
       transactionType: 'BUY',
@@ -141,50 +137,27 @@ function buildTestTransactions(): Transaction[] {
 
 
 // =====================================================================
-// Settlement date (Bug 4)
-// =====================================================================
-describe('settlement date – T+1 business day', () => {
-  test('Monday trade settles Tuesday', () => {
-    expect(computeSettlementDate('2024-01-15')).toBe('2024-01-16');
-  });
-
-  test('Wednesday trade settles Thursday (crosses month boundary)', () => {
-    // Jan 31 (Wed) -> Feb 1 (Thu)
-    expect(computeSettlementDate('2024-01-31')).toBe('2024-02-01');
-  });
-
-  test('Friday trade settles Monday (skips weekend)', () => {
-    // Mar 29 (Fri) -> Apr 1 (Mon)
-    expect(computeSettlementDate('2024-03-29')).toBe('2024-04-01');
-  });
-
-  test('Thursday trade settles Friday', () => {
-    expect(computeSettlementDate('2024-02-01')).toBe('2024-02-02');
-  });
-});
-
-
-// =====================================================================
-// Combine maturation columns (Bug 1) + Settlement (Bug 4)
+// Combine maturation columns (Bug 1 + month attribution interaction)
 // =====================================================================
 describe('combineMaturationColumns', () => {
-  test('January MATURATION combines correctly (mid-month only)', () => {
+  test('January MATURATION combines correctly (mid-month transactions only)', () => {
     const signed = adjustTransactionSigns(buildTestTransactions());
     const grouped = groupByMonthAndType(signed);
     const combined = combineMaturationColumns(grouped);
 
-    // Jan mid-month: MATURATION=-3B + MATURATION_OFFSET=-1B = -4B
-    // (Jan 31 transactions settle in Feb, not Jan)
+    // Only mid-month Jan transactions should be in January:
+    // MATURATION -3B + MATURATION_OFFSET -1B = -4B
     expect(combined['2024-01']['MATURATION']).toBe(-4_000_000_000);
     expect(combined['2024-01']['MATURATION_OFFSET']).toBeUndefined();
   });
 
-  test('February combines Jan-31 settlement maturation correctly', () => {
+  test('February has combined maturation from end-of-January activity', () => {
     const signed = adjustTransactionSigns(buildTestTransactions());
     const grouped = groupByMonthAndType(signed);
     const combined = combineMaturationColumns(grouped);
 
-    // Feb: MATURATION=-4B (Jan 31 settle) + MATURATION_OFFSET=-1.5B (Jan 31) = -5.5B
+    // End-of-Jan maturation activity should appear in February:
+    // MATURATION -4B + MATURATION_OFFSET -1.5B = -5.5B
     expect(combined['2024-02']['MATURATION']).toBe(-5_500_000_000);
   });
 
@@ -201,24 +174,48 @@ describe('combineMaturationColumns', () => {
 
 
 // =====================================================================
+// Month attribution for end-of-month transactions
+// =====================================================================
+describe('month attribution – end-of-month transactions', () => {
+  test('Jan-31 maturation appears in February grouping', () => {
+    const signed = adjustTransactionSigns(buildTestTransactions());
+    const grouped = groupByMonthAndType(signed);
+
+    // The Jan-31 MATURATION and MATURATION_OFFSET should be attributed
+    // to February, not January
+    expect(grouped['2024-02']['MATURATION']).toBe(-4_000_000_000);
+    expect(grouped['2024-02']['MATURATION_OFFSET']).toBe(-1_500_000_000);
+  });
+
+  test('Mar-29 BUY appears in April grouping', () => {
+    const signed = adjustTransactionSigns(buildTestTransactions());
+    const grouped = groupByMonthAndType(signed);
+
+    // The Mar-29 (Friday) BUY should be attributed to April
+    expect(grouped['2024-04']).toBeDefined();
+    expect(grouped['2024-04']['BUY']).toBe(3_000_000_000);
+  });
+});
+
+
+// =====================================================================
 // Cumulative sum with forward-fill (Bug 2)
 // =====================================================================
 describe('cumulativeSum – forward-fill', () => {
-  test('MATURATION carries forward into April (no new maturations)', () => {
+  test('MATURATION carries forward into April (no new maturations in April)', () => {
     const signed = adjustTransactionSigns(buildTestTransactions());
     const grouped = groupByMonthAndType(signed);
     const combined = combineMaturationColumns(grouped);
     const dates = sortDates(Object.keys(combined));
     const cumulative = cumulativeSum(combined, dates);
 
-    // Apr has only BUY (from Mar 29 settlement); cumulative MATURATION
-    // should carry forward from March
+    // April has only BUY; cumulative MATURATION should carry from March
     expect(cumulative['2024-04']).toBeDefined();
     expect(cumulative['2024-04']['MATURATION']).toBeDefined();
     expect(cumulative['2024-04']['MATURATION']).toBe(-15_500_000_000);
   });
 
-  test('BUY carries forward into May (no new purchases)', () => {
+  test('BUY carries forward into May (no new purchases in May)', () => {
     const signed = adjustTransactionSigns(buildTestTransactions());
     const grouped = groupByMonthAndType(signed);
     const combined = combineMaturationColumns(grouped);
@@ -256,34 +253,10 @@ describe('convertToBillions – sign preservation', () => {
 
 
 // =====================================================================
-// Settlement grouping (Bug 4 + Bug 1 interaction)
-// =====================================================================
-describe('settlement date – month boundary grouping', () => {
-  test('Jan-31 maturation settles in February', () => {
-    const signed = adjustTransactionSigns(buildTestTransactions());
-    const grouped = groupByMonthAndType(signed);
-
-    // Jan 31 MATURATION + MATURATION_OFFSET settle Feb 1
-    expect(grouped['2024-02']['MATURATION']).toBe(-4_000_000_000);
-    expect(grouped['2024-02']['MATURATION_OFFSET']).toBe(-1_500_000_000);
-  });
-
-  test('Friday Mar-29 BUY settles Monday Apr-1', () => {
-    const signed = adjustTransactionSigns(buildTestTransactions());
-    const grouped = groupByMonthAndType(signed);
-
-    // Mar 29 (Fri) BUY 3B settles Apr 1 (Mon)
-    expect(grouped['2024-04']).toBeDefined();
-    expect(grouped['2024-04']['BUY']).toBe(3_000_000_000);
-  });
-});
-
-
-// =====================================================================
-// Full pipeline end-to-end (all 4 bugs)
+// Full pipeline end-to-end
 // =====================================================================
 describe('full pipeline – end-to-end', () => {
-  test('January net activity is +$6B (BUY 10B minus combined MATURATION 4B)', () => {
+  test('January net activity is +$6B (mid-month purchases minus maturations)', () => {
     const report = runPipeline(buildTestTransactions());
     const table = report.monthlyTable;
 
