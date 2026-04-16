@@ -1,0 +1,15 @@
+{
+  "name": "treasury-analytics-pipeline",
+  "version": "1.0.0",
+  "description": "Treasury SOMA portfolio analytics and visualization pipeline",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0",
+    "@types/node": "^20.11.0"
+  }
+}
